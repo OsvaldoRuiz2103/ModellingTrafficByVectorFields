@@ -1,124 +1,126 @@
-# detectors_yolov4.py
-from pathlib import Path
-import re
+from typing import List, Optional, Sequence
 import cv2
 import numpy as np
+from ultralytics import YOLO
 
-# COCO class ids
-_COCO = {"person":0, "bicycle":1, "car":2, "motorcycle":3, "airplane":4, "bus":5,
-         "train":6, "truck":7, "boat":8, "traffic light":9}
+class YOLOVehicleMaskDetector:
+    def __init__(
+        self,
+        model_path: str,
+        classes: Sequence[str] | Sequence[int] = ("car", "van", "truck", "bus", "motor"),
+        imgsz: int = 1536,
+        max_det: int = 1000,
+        device: Optional[str] = None,     # 'cpu' or '0' etc.
+        use_seg: str = "auto",            # 'auto' | 'seg' | 'box'
+        keep_mask_path: Optional[str] = None,  # binary PNG (white=keep, black=ignore)
+        dilation_px: int = 0,             # e.g., 3-7 to slightly expand masks
+        min_area_frac: float = 0.0,       # drop tiny dets in mask (fraction of frame area)
+    ):
+        self.model = YOLO(model_path)
+        self.imgsz = int(imgsz)
+        self.max_det = int(max_det)
+        self.device = device
+        self.use_seg = use_seg
+        self.dilation_px = int(dilation_px)
+        self.min_area_frac = float(min_area_frac)
 
-def _resolve(p: str) -> str:
-    p = Path(p).expanduser()
-    return str(p if p.exists() else (Path.cwd() / p.name))
+        # resolve class ids from names/ids in the loaded model
+        self.class_ids = self._resolve_class_ids(classes)
 
-def _read_cfg_size(cfg_path: str) -> tuple[int, int]:
-    """Parse Darknet cfg for width/height; default to 416 if not found."""
-    w = h = None
-    try:
-        with open(cfg_path, "r", encoding="utf-8", errors="ignore") as f:
-            for line in f:
-                line = line.strip()
-                if line.startswith("#") or "=" not in line:
-                    continue
-                k, v = [x.strip() for x in line.split("=", 1)]
-                if k.lower() == "width":
-                    w = int(re.findall(r"\d+", v)[0])
-                elif k.lower() == "height":
-                    h = int(re.findall(r"\d+", v)[0])
-        if not w or not h:
-            raise ValueError
-    except Exception:
-        w = h = 416
-    return w, h
+        # optional ROI keep-mask
+        self.keep_mask = None
+        if keep_mask_path:
+            m = cv2.imread(str(keep_mask_path), cv2.IMREAD_GRAYSCALE)
+            if m is None:
+                raise FileNotFoundError(f"keep_mask not found: {keep_mask_path}")
+            self.keep_mask = (m > 0).astype(np.uint8) * 255  # 0/255
 
-class YOLOCarDetector:
-    """
-    YOLOv4 / YOLOv4-tiny (Darknet cfg+weights via OpenCV DNN).
-    API: .car_mask(frame_bgr, conf=0.5) -> boolean mask (H,W)
-    """
-    def __init__(self,
-                 cfg: str,
-                 weights: str,
-                 use_gpu: bool = False,
-                 include_bus_truck: bool = False,
-                 nms_thresh: float = 0.45):
-        cfg = _resolve(cfg)
-        weights = _resolve(weights)
-
-        self.net = cv2.dnn.readNetFromDarknet(cfg, weights)
-        self.out_names = self.net.getUnconnectedOutLayersNames()
-        self.inp_w, self.inp_h = _read_cfg_size(cfg)
-
-        if use_gpu:
-            self.net.setPreferableBackend(cv2.dnn.DNN_BACKEND_CUDA)
-            self.net.setPreferableTarget(cv2.dnn.DNN_TARGET_CUDA)
-        else:
-            self.net.setPreferableBackend(cv2.dnn.DNN_BACKEND_OPENCV)
-            self.net.setPreferableTarget(cv2.dnn.DNN_TARGET_CPU)
-
-        self.nms_thresh = float(nms_thresh)
-        self.allowed_ids = {_COCO["car"]}
-        if include_bus_truck:
-            self.allowed_ids |= {_COCO["bus"], _COCO["truck"]}
-
-    def car_mask(self, frame_bgr: np.ndarray, conf: float = 0.5, expand_px: int = 6) -> np.ndarray:
+    def car_mask(self, frame_bgr: np.ndarray, conf: float = 0.1, iou: float = 0.7) -> np.ndarray:
         """
-        Returns a boolean mask where True corresponds to detected car pixels.
-        conf: threshold on (objectness * class_prob) after parsing YOLO outputs.
+        Returns a binary mask (H, W) where True are vehicle pixels (union of all vehicles).
         """
         H, W = frame_bgr.shape[:2]
+        img = frame_bgr
 
-        # 1) Preprocess
-        blob = cv2.dnn.blobFromImage(
-            frame_bgr, scalefactor=1/255.0, size=(self.inp_w, self.inp_h),
-            mean=(0, 0, 0), swapRB=True, crop=False
-        )
-        self.net.setInput(blob)
+        # apply ROI keep-mask if provided (resize once to frame size)
+        if self.keep_mask is not None:
+            if self.keep_mask.shape != (H, W):
+                km = cv2.resize(self.keep_mask, (W, H), interpolation=cv2.INTER_NEAREST)
+            else:
+                km = self.keep_mask
+            img = cv2.bitwise_and(img, img, mask=km)
 
-        # 2) Forward
-        outs = self.net.forward(self.out_names)
+        # run model on the numpy image directly
+        res = self.model.predict(
+            source=img,
+            imgsz=self.imgsz,
+            max_det=self.max_det,
+            conf=conf,
+            iou=iou,
+            device=self.device,
+            verbose=False,
+        )[0]  
 
-        # 3) Parse detections
-        boxes, scores, class_ids = [], [], []
-        x_scale, y_scale = W / self.inp_w, H / self.inp_h
+        # union mask (uint8 0/255)
+        union = np.zeros((H, W), np.uint8)
 
-        for det in outs:              # det shape: (N, 85) typically
-            for row in det:
-                obj = float(row[4])
-                if obj < 1e-6:
+        # choose seg vs box
+        want_seg = self.use_seg in ("auto", "seg")
+        have_seg = hasattr(res, "masks") and (res.masks is not None) and (getattr(res.masks, "data", None) is not None)
+
+        if want_seg and have_seg:
+            # instance masks (N,h',w') in model scale -> resize to frame
+            mdat = res.masks.data.cpu().numpy()
+            # apply class filter by indexing detections
+            keep_idx = self._keep_indices(res)
+            for i in keep_idx:
+                m_small = mdat[i]
+                m = cv2.resize(m_small, (W, H), interpolation=cv2.INTER_NEAREST)
+                if self.min_area_frac > 0 and (m > 0.5).sum() < self.min_area_frac * H * W:
                     continue
-                class_scores = row[5:]
-                cid = int(np.argmax(class_scores))
-                score = obj * float(class_scores[cid])
-                if score < conf:
-                    continue
-                cx, cy, bw, bh = row[0:4]
-                # Convert center-format (network scale) to top-left (image px)
-                px = int((cx - bw/2) * x_scale)
-                py = int((cy - bh/2) * y_scale)
-                pw = int(bw * x_scale)
-                ph = int(bh * y_scale)
-                boxes.append([px, py, pw, ph])
-                scores.append(score)
-                class_ids.append(cid)
+                union = np.maximum(union, (m > 0.5).astype(np.uint8) * 255)
+        else:
+            if res.boxes is not None and len(res.boxes) > 0:
+                xyxy = res.boxes.xyxy.cpu().numpy().astype(int)
+                cls = res.boxes.cls.cpu().numpy().astype(int)
+                for i, (x1, y1, x2, y2) in enumerate(xyxy):
+                    if cls[i] not in self.class_ids: 
+                        continue
+                    # clamp and fill
+                    x1 = max(0, min(x1, W - 1)); x2 = max(0, min(x2, W))
+                    y1 = max(0, min(y1, H - 1)); y2 = max(0, min(y2, H))
+                    if x2 <= x1 or y2 <= y1:
+                        continue
+                    if self.min_area_frac > 0 and (x2 - x1) * (y2 - y1) < self.min_area_frac * H * W:
+                        continue
+                    union[y1:y2, x1:x2] = 255
 
-        # 4) NMS and masking
-        mask = np.zeros((H, W), np.uint8)
-        if boxes:
-            idxs = cv2.dnn.NMSBoxes(boxes, scores, conf, self.nms_thresh)
-            if len(idxs) > 0:
-                if isinstance(idxs, np.ndarray):
-                    idxs = idxs.flatten().tolist()
-                for i in idxs:
-                    if class_ids[i] in self.allowed_ids:
-                        x, y, w, h = boxes[i]
-                        x1, y1 = max(0, x), max(0, y)
-                        x2, y2 = min(W - 1, x + w), min(H - 1, y + h)
-                        mask[y1:y2+1, x1:x2+1] = 255
+        if self.dilation_px > 0 and union.any():
+            k = np.ones((self.dilation_px, self.dilation_px), np.uint8)
+            union = cv2.dilate(union, k, 1)
 
-        if expand_px > 0 and mask.any():
-            k = np.ones((expand_px, expand_px), np.uint8)
-            mask = cv2.dilate(mask, k, 1)
+        return union.astype(bool)
 
-        return mask.astype(bool)
+    def _resolve_class_ids(self, wanted: Sequence[str | int]) -> List[int]:
+        names = self.model.names
+        if isinstance(names, dict):
+            name2id = {v: int(k) for k, v in names.items()}
+        else:
+            name2id = {n: i for i, n in enumerate(names)}
+            
+        ids: List[int] = []
+        for t in wanted:
+            if isinstance(t, int) or (isinstance(t, str) and t.isdigit()):
+                ids.append(int(t))
+            else:
+                if t not in name2id:
+                    raise ValueError(f"Unknown class name: {t}. Available: {sorted(name2id.keys())}")
+                ids.append(name2id[t])
+        return sorted(set(ids))
+
+    def _keep_indices(self, res) -> List[int]:
+        """indices of detections whose class is in self.class_ids"""
+        if res.boxes is None or len(res.boxes) == 0:
+            return []
+        cls = res.boxes.cls.cpu().numpy().astype(int)
+        return [i for i, c in enumerate(cls) if c in self.class_ids]

@@ -1,1 +1,9 @@
 __pycache__/
+datasets/
+visdrone-vid-yolo/
+runs/
+
+yolov8n.pt
+yolov8m.pt
+yolov8l.pt
+yolov8x.pt
