@@ -1,0 +1,10 @@
+# overhead_bytetrack.yaml — ByteTrack tuned for aerial traffic
+tracker_type: bytetrack
+track_high_thresh: 0.25
+track_low_thresh: 0.05
+new_track_thresh: 0.20
+match_thresh: 0.75
+fuse_score: True          
+gmc_method: None          # no camera motion compensation
+track_buffer: 60          
+frame_rate: 30
