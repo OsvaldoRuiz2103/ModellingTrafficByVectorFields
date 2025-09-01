@@ -2,6 +2,7 @@ from typing import List, Optional, Sequence
 import cv2
 import numpy as np
 from ultralytics import YOLO
+import onnxruntime as ort
 
 class YOLOVehicleMaskDetector:
     def __init__(
@@ -10,16 +11,32 @@ class YOLOVehicleMaskDetector:
         classes: Sequence[str] | Sequence[int] = ("car", "van", "truck", "bus", "motor"),
         imgsz: int = 1536,
         max_det: int = 1000,
-        device: Optional[str] = None,     # 'cpu' or '0' etc.
         use_seg: str = "auto",            # 'auto' | 'seg' | 'box'
         keep_mask_path: Optional[str] = None,  # binary PNG (white=keep, black=ignore)
         dilation_px: int = 0,             # e.g., 3-7 to slightly expand masks
         min_area_frac: float = 0.0,       # drop tiny dets in mask (fraction of frame area)
     ):
         self.model = YOLO(model_path)
+
+        # Force ONNX session to use DirectML
+        if model_path.endswith(".onnx"):
+            # warm-up so predictor is built
+            _ = self.model.predict(np.zeros((8,8,3), np.uint8), imgsz=8, stream=True, verbose=False)
+
+            sess = getattr(self.model.predictor.model, "session", None)
+            if sess is None:
+                raise RuntimeError("ONNX Runtime session not found inside Ultralytics model.")
+
+            # Use DirectML first, CPU as fallback
+            prov = [("DmlExecutionProvider", {"device_id": 0}), "CPUExecutionProvider"]
+            if "DmlExecutionProvider" not in ort.get_available_providers():
+                raise RuntimeError("DmlExecutionProvider not available. Did you install onnxruntime-directml in THIS env?")
+            sess.set_providers(prov)
+
+            print("[INFO] Forcing ONNX Runtime to use DirectML (Windows GPU)")
+
         self.imgsz = int(imgsz)
         self.max_det = int(max_det)
-        self.device = device
         self.use_seg = use_seg
         self.dilation_px = int(dilation_px)
         self.min_area_frac = float(min_area_frac)
@@ -57,7 +74,6 @@ class YOLOVehicleMaskDetector:
             max_det=self.max_det,
             conf=conf,
             iou=iou,
-            device=self.device,
             verbose=False,
         )[0]  
 

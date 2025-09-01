@@ -25,7 +25,7 @@ def process_videos(videos: List[str],
     det = YOLOVehicleMaskDetector(
         model_path=r"models/visdrone/best.pt",
         classes=("car","van","truck","bus","motor"),
-        imgsz=1536, max_det=1000, device=None,   # set to '0' if you have CUDA
+        imgsz=1536, max_det=1000, 
         use_seg="auto",                          # try instance masks, else bbox
         dilation_px=3,                           # optional: expand a bit
         min_area_frac=0.00005                    # optional: drop tiny specks
