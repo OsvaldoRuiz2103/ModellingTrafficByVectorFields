@@ -80,40 +80,50 @@ def process_videos(videos: List[str],
        
             mask_r = cv2.resize(cars_only.astype(np.uint8), (W, H), interpolation=cv2.INTER_NEAREST)
             cars_only = mask_r.astype(bool)   
-            cars_u8   = mask_r * 255          
 
-            cars_u8 = cv2.morphologyEx(cars_u8, cv2.MORPH_CLOSE, kernel, iterations=1)
-            _, _, stats, _ = cv2.connectedComponentsWithStats(cars_u8, connectivity=8)
+            if(processed_frames % frame_step == 0):
+                cars_u8   = mask_r * 255          
+                cars_u8 = cv2.morphologyEx(cars_u8, cv2.MORPH_CLOSE, kernel, iterations=1)
+                _, _, stats, _ = cv2.connectedComponentsWithStats(cars_u8, connectivity=8)
 
-            # stats: [x, y, w, h, area], stats[0] is background
-            area_min_px = 64
-            boxes = [(int(x), int(y), int(w), int(h))
-                    for (x, y, w, h, area) in stats[1:] if area > area_min_px]
-            
-            if not boxes:
-                prev_gray = gray
-                processed_frames += 1
-                continue
+                # stats: [x, y, w, h, area], stats[0] is background
+                area_min_px = 64
+                boxes = [(int(x), int(y), int(w), int(h))
+                        for (x, y, w, h, area) in stats[1:] if area > area_min_px]
+                
+                if not boxes:
+                    prev_gray = gray
+                    processed_frames += 1
+                    continue
 
-            total_roi_area = sum(w*h for (x, y, w, h) in boxes)
-            use_roi = (total_roi_area < 0.4 * H * W) and (len(boxes) < 60)
+                total_roi_area = sum(w*h for (x, y, w, h) in boxes)
+                use_roi = (total_roi_area < 0.4 * H * W) and (len(boxes) < 60)
 
-            if use_roi:
-                pad = 16  # ~winsize
+            if (processed_frames % frame_step ==0 & use_roi):
+                pad = max(16, 8 * frame_step)  # ~winsize
                 for (x,y,w,h) in boxes:
                     x1 = max(0, x - pad); y1 = max(0, y - pad)
                     x2 = min(W, x + w + pad); y2 = min(H, y + h + pad)
                     roi1 = prev_gray[y1:y2, x1:x2]
                     roi2 = gray[y1:y2, x1:x2]
-                    flow_roi = compute_flow_farneback(roi1, roi2)
+                    flow_roi = compute_flow_farneback(roi1, roi2, frame_step)
                     flow[y1:y2, x1:x2] = flow_roi
             else:
-                flow = compute_flow_farneback(prev_gray, gray)
+                flow = compute_flow_farneback(prev_gray, gray, frame_step)
 
+            flow = flow / float(frame_step) 
             vel  = flow * fps
 
-            mag_pf = np.sqrt((flow**2).sum(axis=2))
+            mag_pf = np.linalg.norm(flow, axis=2)
             motion_mask = mag_pf >= float(min_mag_px_per_frame)
+
+            '''
+            if frame_step >= 2:
+                back = compute_flow_farneback(gray, prev_gray, k=frame_step) / float(frame_step)
+                fb_err = np.linalg.norm(flow + back, axis=2)
+                reliable = fb_err < 0.5*(mag_pf + 1e-3)
+                motion_mask &= reliable
+            '''
 
             mask = motion_mask & cars_only
 

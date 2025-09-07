@@ -3,12 +3,16 @@ import numpy as np
 from typing import Tuple
 
 
-def compute_flow_farneback(prev_gray: np.ndarray, gray: np.ndarray) -> np.ndarray:
-    # Dense displacement (px/frame)
+def compute_flow_farneback(prev_gray, gray, k: int = 1):
+    levels   = 3 + int(np.ceil(np.log2(k)))      # hasta 5–6
+    winsize  = min(41, 15 + 8*(k-1))             # 15→23→31…
+    iters    = 3 + (1 if k>=2 else 0)
+    poly_n   = 5 if k==1 else 7
+    poly_sig = 1.2 if k==1 else 1.5
     return cv2.calcOpticalFlowFarneback(
         prev_gray, gray, None,
-        pyr_scale=0.5, levels=3, winsize=15, iterations=3,
-        poly_n=5, poly_sigma=1.2, flags=0
+        pyr_scale=0.5, levels=levels, winsize=winsize,
+        iterations=iters, poly_n=poly_n, poly_sigma=poly_sig, flags=0
     )
 
 
