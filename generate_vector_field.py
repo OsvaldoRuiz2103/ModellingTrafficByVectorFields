@@ -5,15 +5,16 @@ import numpy as np
 import time
 
 from video_processing import ensure_fps, resize_to_width
-from trajectory_analysis import compute_flow_farneback, block_weighted_average
-from detectors import YOLOVehicleMaskDetector
+from trajectory_analysis import compute_flow_roi, block_weighted_average
+from detectors import YOLOVehicleMaskDetector, boxes_from_mask, warp_mask_with_flow
 
 def process_videos(videos: List[str],
                    grid: int = 16,
                    min_mag_px_per_frame: float = 0.5,
                    frame_step: int = 1,
                    resize_width: Optional[int] = 960,
-                   fps_fallback: float = 30.0):
+                   fps_fallback: float = 30.0,
+                   detect_every: int = 3):
     """
     Aggregate optical flow from multiple videos into one vector field.
     Shows progress and timing.
@@ -36,6 +37,9 @@ def process_videos(videos: List[str],
     sum_v_cells = None
     sum_w_cells = None
     Hc = Wc = None
+
+    last_mask = None
+    frames_since_det = 0
 
     for idx, path in enumerate(videos, 1):
         print(f"\n[INFO] Processing video {idx}/{len(videos)}: {path}")
@@ -71,45 +75,33 @@ def process_videos(videos: List[str],
                 if not ok: break
             if not ok: break
 
-            cars_only = det.car_mask(frame, conf=0.7, iou=0.7)
+            frame_resized = resize_to_width(frame, resize_width)
+            gray = cv2.cvtColor(frame_resized, cv2.COLOR_BGR2GRAY)
 
-            frame = resize_to_width(frame, resize_width)
-            gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+            run_yolo = (last_mask is None) or (frames_since_det >= detect_every)
 
-            flow = np.zeros((H, W, 2), np.float32)
-       
-            mask_r = cv2.resize(cars_only.astype(np.uint8), (W, H), interpolation=cv2.INTER_NEAREST)
-            cars_only = mask_r.astype(bool)   
+            flow = None
+            boxes = []
 
-            if(processed_frames % frame_step == 0):
-                cars_u8   = mask_r * 255          
-                cars_u8 = cv2.morphologyEx(cars_u8, cv2.MORPH_CLOSE, kernel, iterations=1)
-                _, _, stats, _ = cv2.connectedComponentsWithStats(cars_u8, connectivity=8)
+            if not run_yolo:
+                boxes = boxes_from_mask((last_mask.astype(np.uint8)*255))
+                flow = compute_flow_roi(prev_gray, gray, boxes, k=frame_step)  # único cálculo de flow
+                warped = warp_mask_with_flow((last_mask.astype(np.uint8)*255), flow)
+                cars_only = cv2.morphologyEx(warped, cv2.MORPH_CLOSE, kernel, iterations=1) > 0
+            else:
+                cars_only = det.car_mask(frame_resized, conf=0.7, iou=0.7)
 
-                # stats: [x, y, w, h, area], stats[0] is background
-                area_min_px = 64
-                boxes = [(int(x), int(y), int(w), int(h))
-                        for (x, y, w, h, area) in stats[1:] if area > area_min_px]
-                
+            if flow is None:
+                boxes = boxes_from_mask((cars_only.astype(np.uint8)*255))
+
                 if not boxes:
                     prev_gray = gray
                     processed_frames += 1
+                    last_mask = None
+                    print(f"[INFO] No vehicles detected in frame {processed_frames}, skipping flow.")
                     continue
 
-                total_roi_area = sum(w*h for (x, y, w, h) in boxes)
-                use_roi = (total_roi_area < 0.4 * H * W) and (len(boxes) < 60)
-
-            if (processed_frames % frame_step ==0 & use_roi):
-                pad = max(16, 8 * frame_step)  # ~winsize
-                for (x,y,w,h) in boxes:
-                    x1 = max(0, x - pad); y1 = max(0, y - pad)
-                    x2 = min(W, x + w + pad); y2 = min(H, y + h + pad)
-                    roi1 = prev_gray[y1:y2, x1:x2]
-                    roi2 = gray[y1:y2, x1:x2]
-                    flow_roi = compute_flow_farneback(roi1, roi2, frame_step)
-                    flow[y1:y2, x1:x2] = flow_roi
-            else:
-                flow = compute_flow_farneback(prev_gray, gray, frame_step)
+                flow = compute_flow_roi(prev_gray, gray, boxes, k=frame_step)
 
             flow = flow / float(frame_step) 
             vel  = flow * fps
@@ -117,6 +109,7 @@ def process_videos(videos: List[str],
             mag_pf = np.linalg.norm(flow, axis=2)
             motion_mask = mag_pf >= float(min_mag_px_per_frame)
 
+            # Optional: forward-backward consistency check
             '''
             if frame_step >= 2:
                 back = compute_flow_farneback(gray, prev_gray, k=frame_step) / float(frame_step)
@@ -134,6 +127,11 @@ def process_videos(videos: List[str],
 
             prev_gray = gray
             processed_frames += 1
+            frames_since_det = 0 if run_yolo else (frames_since_det + 1)
+            
+            total_roi_area = sum(w*h for (_, _, w, h) in boxes)
+            last_mask = (cars_only if (total_roi_area < 0.4 * H * W) and (len(boxes) < 60) else None)
+
 
             # Show progress each 50 frames
             if processed_frames % 50 == 0 or processed_frames == total_frames:

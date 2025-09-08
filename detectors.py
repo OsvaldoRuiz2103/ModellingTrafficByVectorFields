@@ -140,3 +140,17 @@ class YOLOVehicleMaskDetector:
             return []
         cls = res.boxes.cls.cpu().numpy().astype(int)
         return [i for i, c in enumerate(cls) if c in self.class_ids]
+    
+def boxes_from_mask(mask_u8, min_area=64):
+    _, _, stats, _ = cv2.connectedComponentsWithStats(mask_u8, connectivity=8)
+    return [(int(x), int(y), int(w), int(h))
+            for (x, y, w, h, area) in stats[1:] if area >= min_area]
+
+def warp_mask_with_flow(mask_u8: np.ndarray, flow: np.ndarray) -> np.ndarray:
+    H, W = mask_u8.shape
+    X, Y = np.meshgrid(np.arange(W), np.arange(H))
+    map_x = (X - flow[..., 0]).astype(np.float32)
+    map_y = (Y - flow[..., 1]).astype(np.float32)
+    warped = cv2.remap(mask_u8, map_x, map_y, interpolation=cv2.INTER_NEAREST,
+                    borderMode=cv2.BORDER_CONSTANT, borderValue=0)
+    return warped
