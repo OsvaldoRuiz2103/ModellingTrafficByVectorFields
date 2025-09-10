@@ -3,6 +3,7 @@ import cv2
 import numpy as np
 from ultralytics import YOLO
 import onnxruntime as ort
+import gc
 
 class YOLOVehicleMaskDetector:
     def __init__(
@@ -115,6 +116,7 @@ class YOLOVehicleMaskDetector:
             k = np.ones((self.dilation_px, self.dilation_px), np.uint8)
             union = cv2.dilate(union, k, 1)
 
+        del res
         return union.astype(bool)
 
     def _resolve_class_ids(self, wanted: Sequence[str | int]) -> List[int]:
@@ -140,6 +142,19 @@ class YOLOVehicleMaskDetector:
             return []
         cls = res.boxes.cls.cpu().numpy().astype(int)
         return [i for i, c in enumerate(cls) if c in self.class_ids]
+    
+    def close(self):
+        try:
+            pred = getattr(self.model, "predictor", None)
+            if pred is not None and hasattr(pred, "model"):
+                m = pred.model
+                # liberar referencia a la sesión ONNX Runtime si existe
+                if hasattr(m, "session"):
+                    m.session = None
+        except Exception:
+            pass
+        self.model = None
+        gc.collect()
     
 def boxes_from_mask(mask_u8, min_area=64):
     _, _, stats, _ = cv2.connectedComponentsWithStats(mask_u8, connectivity=8)

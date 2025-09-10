@@ -19,7 +19,7 @@ def plot_quiver_colored(u, v, weights, grid,
     mask = weights >= float(min_weight)
     Xp, Yp, Up, Vp, Cp = X[mask], Y[mask], u[mask], v[mask], C[mask]
 
-    plt.figure(figsize=(9,7))
+    fig=plt.figure(figsize=(9,7))
     q = plt.quiver(Xp, Yp, Up, -Vp, Cp, angles="xy",
                     scale_units="xy", scale=1.0, cmap=cmap)
     plt.gca().invert_yaxis()
@@ -29,6 +29,7 @@ def plot_quiver_colored(u, v, weights, grid,
     plt.tight_layout()
     if save_path: plt.savefig(save_path, dpi=200)
     plt.show()
+    plt.close(fig)
 
 
 def plot_streamplot_colored(u, v, grid,
@@ -45,7 +46,7 @@ def plot_streamplot_colored(u, v, grid,
     C = speed_px_s * px_to_m if (px_to_m and px_to_m > 0) else speed_px_s
     units = "m/s" if (px_to_m and px_to_m > 0) else "px/s"
 
-    plt.figure(figsize=(9,7))
+    fig=plt.figure(figsize=(9,7))
     sp = plt.streamplot(X, Y, u, -v, color=C, density=density,
                         linewidth=linewidth, cmap=cmap)
     plt.gca().invert_yaxis()
@@ -55,3 +56,4 @@ def plot_streamplot_colored(u, v, grid,
     plt.tight_layout()
     if save_path: plt.savefig(save_path, dpi=200)
     plt.show()
+    plt.close(fig)

@@ -148,6 +148,12 @@ def process_videos(videos: List[str],
     if sum_w_cells is None:
         raise RuntimeError("No valid motion found.")
 
+    try:
+        det.close()
+    except Exception:
+        pass
+    import gc; gc.collect()
+
     field = sum_v_cells / np.maximum(sum_w_cells[..., None], 1e-6)
     return field[...,0], field[...,1], sum_w_cells, Hc, Wc
 
